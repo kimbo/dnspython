@@ -305,6 +305,197 @@ def https(q, where, timeout=None, port=443, path='/dns-query', post=True,
         raise BadResponse
     return r
 
+def https_no_close_session(q, where, timeout=None, port=443, path='/dns-query', post=True,
+          verify=True, af=None, source=None, source_port=0,
+          one_rr_per_rrset=False, ignore_trailing=False):
+    """Return the response obtained after sending a query via DNS-over-HTTPS.
+
+    *q*, a ``dns.message.Message``, the query to send.
+
+    *where*, a ``str``, the nameserver IP address or the full URL. If an IP
+    address is given, the URL will be constructed using the following schema:
+    https:<IP-address>:<port>/<path>.
+
+    *timeout*, a ``float`` or ``None``, the number of seconds to
+    wait before the query times out. If ``None``, the default, wait forever.
+
+    *port*, a ``int``, the port to send the query to. Default is 443.
+
+    *path*, a ``str``. If *where* is an IP address, then *path* will be used to
+    construct the URL to send the DNS query to.
+
+    *post*, a ``bool``. If ``True``, the default, POST method will be used.
+
+    *af*, an ``int``, the address family to use.  The default is ``None``,
+    which causes the address family to use to be inferred from the form of
+    *where*.  If the inference attempt fails, AF_INET is used.  This
+    parameter is historical; you need never set it.
+
+    *source*, a ``str`` containing an IPv4 or IPv6 address, specifying
+    the source address.  The default is the wildcard address.
+
+    *source_port*, an ``int``, the port from which to send the message.
+    The default is 0.
+
+    *one_rr_per_rrset*, a ``bool``. If ``True``, put each RR into its own
+    RRset.
+
+    *ignore_trailing*, a ``bool``. If ``True``, ignore trailing
+    junk at end of the received message.
+
+    Returns a ``dns.message.Message``.
+    """
+    wire = q.to_wire()
+
+    (af, destination, source) = _destination_and_source(af, where, port,
+                                                        source, source_port)
+    if source is None:
+        source = ('', 0)
+    session = requests.sessions.Session()
+    try:
+        # set source port and source address
+        # see https://github.com/requests/toolbelt/blob/master/requests_toolbelt/adapters/source.py
+        session.mount('http://', SourceAddressAdapter(source))
+        session.mount('https://', SourceAddressAdapter(source))
+
+        # effectively set address family
+        # see https://stackoverflow.com/a/46972341/9638991
+        urllib3_cn.allowed_gai_family = lambda: af
+
+        try:
+            _ = ipaddress.ip_address(where)
+            url = 'https://{}:{}{}'.format(where, port, path)
+        except ValueError:
+            url = where
+
+        # see https://tools.ietf.org/html/rfc8484#section-4.1.1 for DoH GET and POST examples
+        if post:
+            headers = {
+                "accept": "application/dns-message",
+                "content-type": "application/dns-message",
+                "content-length": str(len(wire))
+            }
+            response = session.post(url, headers=headers, data=wire, stream=True,
+                                    timeout=timeout, verify=verify)
+        else:
+            wire = base64.urlsafe_b64encode(wire).decode('utf-8').strip("=")
+            headers = {
+                "accept": "application/dns-message"
+            }
+            url += "?dns={}".format(wire)
+            response = session.get(url, headers=headers, stream=True,
+                                   timeout=timeout, verify=verify)
+
+        # see https://tools.ietf.org/html/rfc8484#section-4.2.1 for info about DoH status codes
+        if response.status_code < 200 or response.status_code > 299:
+            raise ValueError('{} responded with status code {}\nResponse body: {}'.format(
+                where, response.status_code, response.content))
+        r = dns.message.from_wire(response.content,
+                                  keyring=q.keyring,
+                                  request_mac=q.request_mac,
+                                  one_rr_per_rrset=one_rr_per_rrset,
+                                  ignore_trailing=ignore_trailing)
+    finally:
+        pass
+    r.time = response.elapsed
+    if not q.is_response(r):
+        raise BadResponse
+    return r
+
+def https_no_session(q, where, timeout=None, port=443, path='/dns-query', post=True,
+          verify=True, af=None, source=None, source_port=0,
+          one_rr_per_rrset=False, ignore_trailing=False):
+    """Return the response obtained after sending a query via DNS-over-HTTPS.
+
+    *q*, a ``dns.message.Message``, the query to send.
+
+    *where*, a ``str``, the nameserver IP address or the full URL. If an IP
+    address is given, the URL will be constructed using the following schema:
+    https:<IP-address>:<port>/<path>.
+
+    *timeout*, a ``float`` or ``None``, the number of seconds to
+    wait before the query times out. If ``None``, the default, wait forever.
+
+    *port*, a ``int``, the port to send the query to. Default is 443.
+
+    *path*, a ``str``. If *where* is an IP address, then *path* will be used to
+    construct the URL to send the DNS query to.
+
+    *post*, a ``bool``. If ``True``, the default, POST method will be used.
+
+    *af*, an ``int``, the address family to use.  The default is ``None``,
+    which causes the address family to use to be inferred from the form of
+    *where*.  If the inference attempt fails, AF_INET is used.  This
+    parameter is historical; you need never set it.
+
+    *source*, a ``str`` containing an IPv4 or IPv6 address, specifying
+    the source address.  The default is the wildcard address.
+
+    *source_port*, an ``int``, the port from which to send the message.
+    The default is 0.
+
+    *one_rr_per_rrset*, a ``bool``. If ``True``, put each RR into its own
+    RRset.
+
+    *ignore_trailing*, a ``bool``. If ``True``, ignore trailing
+    junk at end of the received message.
+
+    Returns a ``dns.message.Message``.
+    """
+    wire = q.to_wire()
+
+    (af, destination, source) = _destination_and_source(af, where, port,
+                                                        source, source_port)
+    if source is None:
+        source = ('', 0)
+    # with requests.Session() as session:
+    #     # set source port and source address
+    #     # see https://github.com/requests/toolbelt/blob/master/requests_toolbelt/adapters/source.py
+    #     session.mount('http://', SourceAddressAdapter(source))
+    #     session.mount('https://', SourceAddressAdapter(source))
+
+    # effectively set address family
+    # see https://stackoverflow.com/a/46972341/9638991
+    urllib3_cn.allowed_gai_family = lambda: af
+
+    try:
+        _ = ipaddress.ip_address(where)
+        url = 'https://{}:{}{}'.format(where, port, path)
+    except ValueError:
+        url = where
+
+    # see https://tools.ietf.org/html/rfc8484#section-4.1.1 for DoH GET and POST examples
+    if post:
+        headers = {
+            "accept": "application/dns-message",
+            "content-type": "application/dns-message",
+            "content-length": str(len(wire))
+        }
+        response = requests.post(url, headers=headers, data=wire, stream=True,
+                                timeout=timeout, verify=verify)
+    else:
+        wire = base64.urlsafe_b64encode(wire).decode('utf-8').strip("=")
+        headers = {
+            "accept": "application/dns-message"
+        }
+        url += "?dns={}".format(wire)
+        response = requests.get(url, headers=headers, stream=True,
+                               timeout=timeout, verify=verify)
+
+    # see https://tools.ietf.org/html/rfc8484#section-4.2.1 for info about DoH status codes
+    if response.status_code < 200 or response.status_code > 299:
+        raise ValueError('{} responded with status code {}\nResponse body: {}'.format(
+            where, response.status_code, response.content))
+    r = dns.message.from_wire(response.content,
+                              keyring=q.keyring,
+                              request_mac=q.request_mac,
+                              one_rr_per_rrset=one_rr_per_rrset,
+                              ignore_trailing=ignore_trailing)
+    r.time = response.elapsed
+    if not q.is_response(r):
+        raise BadResponse
+    return r
+
 def send_udp(sock, what, destination, expiration=None):
     """Send a DNS message to the specified UDP socket.
 
@@ -908,7 +1099,7 @@ def tcp_batch(q_list, where, timeout=None, port=53, af=None, source=None, source
 
     *port*, an ``int``, the port send the message to.  The default is 53.
 
-    *af*, an ``int``, the address family to use.  The default is ``None``,
+    *af*, an ``int``, the ahttpsddress family to use.  The default is ``None``,
     which causes the address family to use to be inferred from the form of
     *where*.  If the inference attempt fails, AF_INET is used.  This
     parameter is historical; you need never set it.
